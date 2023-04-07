@@ -190,7 +190,7 @@ class DisentangleVAE(tf.keras.Model):
         mu_refeed = self.reparameterize(mu_refeed, logsigma_refeed)
         mu_refeed_shuffled = self.reparameterize(mu_refeed_shuffled, logsigma_refeed_shuffled)
 
-        return tf.reduce_mean(tf.abs(mu - mu_refeed))
+        return tf.reduce_mean(tf.abs(mu_refeed - mu_refeed_shuffled))
 
     @tf.function
     def train_step(self, data):
