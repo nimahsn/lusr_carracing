@@ -1,6 +1,13 @@
 import tensorflow as tf
 import constants as c
 import matplotlib.pyplot as plt
+import numpy as np
+
+def log_normal_pdf(sample, mean, logvar, raxis=1):
+  log2pi = tf.math.log(2. * np.pi)
+  return tf.reduce_sum(
+      -.5 * ((sample - mean) ** 2. * tf.exp(-logvar) + logvar + log2pi),
+      axis=raxis)
 
 class Encoder(tf.keras.Model):
     """
@@ -39,23 +46,26 @@ class Decoder(tf.keras.Model):
     Decoder network for VAE.
     """
 
-    def __init__(self):
+    def __init__(self, apply_sigmoid=False):
         super(Decoder, self).__init__()
         self.main = tf.keras.Sequential([
-            tf.keras.layers.InputLayer(input_shape=(c.DOMAIN_SPECIFIC_LATENT_SIZE + c.CONTENT_LATENT_SIZE,)),
+            tf.keras.layers.InputLayer(input_shape=(c.CONTENT_LATENT_SIZE + c.DOMAIN_SPECIFIC_LATENT_SIZE)),
             tf.keras.layers.Dense(1024),
             tf.keras.layers.Reshape((1, 1, 1024)),
             tf.keras.layers.Conv2DTranspose(128, 5, strides=2, activation='relu'),
             tf.keras.layers.Conv2DTranspose(64, 5, strides=2, activation='relu'),
             tf.keras.layers.Conv2DTranspose(32, 6, strides=2, activation='relu'),
-            tf.keras.layers.Conv2DTranspose(3, 6, strides=2, activation='sigmoid')
+            tf.keras.layers.Conv2DTranspose(3, 6, strides=2)
         ])
+        self.apply_sigmoid = apply_sigmoid
 
     def call(self, x):
         """
         Forward pass of the decoder network.
         """
         x = self.main(x)
+        if self.apply_sigmoid:
+            x = tf.sigmoid(x)
         return x
     
 class ActorNetwork(tf.keras.Model):
@@ -113,6 +123,12 @@ class DisentangleVAE(tf.keras.Model):
         self.content_latent_size = c.CONTENT_LATENT_SIZE
         self.domain_specific_latent_size = c.DOMAIN_SPECIFIC_LATENT_SIZE
         self.kl_loss_weight = tf.Variable(c.KL_LOSS_WEIGHT, trainable=False, dtype=tf.float32)
+        self.forward_recon_loss_weight = tf.Variable(c.FORWARD_RECONS_LOSS_WEIGHT, trainable=False, dtype=tf.float32)
+        self.forward_recon_shuffle_loss_weight = tf.Variable(c.FORWARD_RECONS_SHUFFLE_LOSS_WEIGHT, trainable=False, dtype=tf.float32)
+        self.reverse_recon_loss_weight = tf.Variable(c.REVERSE_LOSS_WEIGHT, trainable=False, dtype=tf.float32)
+        # self.mse_recon = tf.keras.losses.MeanSquaredError()
+        # self.mse_recon_shuffle = tf.keras.losses.MeanSquaredError()
+        self.l1_loss = tf.keras.losses.MeanAbsoluteError()
 
     @tf.function
     def reparameterize(self, mu, logsigma):
@@ -120,8 +136,7 @@ class DisentangleVAE(tf.keras.Model):
         Reparameterization trick to sample from a Gaussian distribution.
         """
         eps = tf.random.normal(shape=tf.shape(mu))
-
-        return mu + tf.exp(logsigma / 2) * eps
+        return mu + tf.exp(logsigma * .5) * eps
     
     @tf.function
     def encode(self, x):
@@ -158,15 +173,18 @@ class DisentangleVAE(tf.keras.Model):
         mu, logsigma, domain_code = self.encode(x)
         z = self.reparameterize(mu, logsigma)
         shuffled_domain_code = tf.random.shuffle(domain_code)
-        
         x_recon = self.decode(z, domain_code)
         x_recon_shuffled = self.decode(z, shuffled_domain_code)
+        cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(logits=x_recon, labels=x)
+        cross_entropy_shuffled = tf.nn.sigmoid_cross_entropy_with_logits(logits=x_recon_shuffled, labels=x)
+        logpx_z = -tf.reduce_sum(cross_entropy, axis=[1, 2, 3])
+        logpx_z_shuffled = -tf.reduce_sum(cross_entropy_shuffled, axis=[1, 2, 3])
+        logpz = log_normal_pdf(z, 0., 0.)
+        logqz_x = log_normal_pdf(z, mu, logsigma)
 
-        mse_reconstruction = tf.reduce_mean(tf.square(x - x_recon))
-        mse_reconstruction_shuffled = tf.reduce_mean(tf.square(x - x_recon_shuffled))
-        kl_divergence = -0.5 * tf.reduce_mean(1 + logsigma - tf.square(mu) - tf.exp(logsigma))
-        
-        return mse_reconstruction + mse_reconstruction_shuffled + self.kl_loss_weight * kl_divergence
+        # kl_divergence = -0.5 * tf.reduce_mean(1 + logsigma - tf.square(mu) - tf.exp(logsigma))
+        # return c.FORWARD_RECONS_LOSS_WEIGHT * mse_reconstruction + c.FORWARD_RECONS_SHUFFLE_LOSS_WEIGHT * mse_reconstruction_shuffled + self.kl_loss_weight * kl_divergence
+        return -tf.reduce_mean(logpx_z + logpz - logqz_x) * self.forward_recon_loss_weight  - tf.reduce_mean(logpx_z_shuffled + logpz - logqz_x) * self.forward_recon_shuffle_loss_weight
 
     @tf.function
     def reverse_cycle(self, x):
@@ -178,8 +196,9 @@ class DisentangleVAE(tf.keras.Model):
         """
 
         # no gradient through the encoder
-        out = tf.stop_gradient(self.encode_concat(x))
-        mu, logsigma, domain_code = tf.split(out, [self.content_latent_size, self.content_latent_size, self.domain_specific_latent_size], axis=1)
+        # out = tf.stop_gradient(self.encode_concat(x))
+        # mu, logsigma, domain_code = tf.split(out, [self.content_latent_size, self.content_latent_size, self.domain_specific_latent_size], axis=1)
+        mu, logsigma, domain_code = self.encode(x)
         mu_random = tf.random.normal(shape=tf.shape(mu))
         shuffled_domain_code = tf.random.shuffle(domain_code)
 
@@ -190,7 +209,7 @@ class DisentangleVAE(tf.keras.Model):
         mu_refeed = self.reparameterize(mu_refeed, logsigma_refeed)
         mu_refeed_shuffled = self.reparameterize(mu_refeed_shuffled, logsigma_refeed_shuffled)
 
-        return tf.reduce_mean(tf.abs(mu_refeed - mu_refeed_shuffled))
+        return self.reverse_recon_loss_weight * self.l1_loss(mu_refeed, mu_refeed_shuffled)
 
     @tf.function
     def train_step(self, data):
@@ -204,8 +223,8 @@ class DisentangleVAE(tf.keras.Model):
             # forward cycle
             forward_cycle_loss = 0.0
             for i in range(c.NUM_DOMAINS):
-                forward_cycle_loss += self.forward_cycle(x[i])
-            forward_cycle_loss /= c.NUM_DOMAINS
+                forward_cycle_loss = forward_cycle_loss + self.forward_cycle(x[i])
+            forward_cycle_loss = forward_cycle_loss / c.NUM_DOMAINS
 
             # reverse cycle
             x = tf.reshape(x, [-1, 64, 64, 3]) # shape (num_domains * batch_size, height, width, channels)
@@ -218,3 +237,4 @@ class DisentangleVAE(tf.keras.Model):
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
         
         return {"loss": loss, "forward_cycle_loss": forward_cycle_loss, "reverse_cycle_loss": reverse_cycle_loss}
+    
