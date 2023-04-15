@@ -41,6 +41,15 @@ class Encoder(tf.keras.Model):
         domain_code = self.domain_code(x)
         return mu, logsigma, domain_code
     
+    @tf.function
+    def call_mu_only(self, x):
+        """
+        Forward pass of the encoder network. Only the mean of the latent distribution is returned.
+        """
+        x = self.main(x)
+        mu = self.mu(x)
+        return mu
+    
 class Decoder(tf.keras.Model):
     """
     Decoder network for VAE.
@@ -77,8 +86,10 @@ class ActorNetwork(tf.keras.Model):
         super(ActorNetwork, self).__init__()
         self.main = tf.keras.Sequential([
             tf.keras.layers.InputLayer(input_shape=(c.CONTENT_LATENT_SIZE,)),
-            tf.keras.layers.Dense(512, activation='relu'),
-            tf.keras.layers.Dense(256, activation='relu'),
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu'),
             tf.keras.layers.Dense(c.NUM_ACTIONS, activation='softmax')
         ])
 
@@ -98,8 +109,10 @@ class CriticNetwork(tf.keras.Model):
         super(CriticNetwork, self).__init__()
         self.main = tf.keras.Sequential([
             tf.keras.layers.InputLayer(input_shape=(c.CONTENT_LATENT_SIZE,)),
-            tf.keras.layers.Dense(512, activation='relu'),
-            tf.keras.layers.Dense(256, activation='relu'),
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu'),
             tf.keras.layers.Dense(1)
         ])
 
@@ -126,8 +139,6 @@ class DisentangleVAE(tf.keras.Model):
         self.forward_recon_loss_weight = tf.Variable(c.FORWARD_RECONS_LOSS_WEIGHT, trainable=False, dtype=tf.float32)
         self.forward_recon_shuffle_loss_weight = tf.Variable(c.FORWARD_RECONS_SHUFFLE_LOSS_WEIGHT, trainable=False, dtype=tf.float32)
         self.reverse_recon_loss_weight = tf.Variable(c.REVERSE_LOSS_WEIGHT, trainable=False, dtype=tf.float32)
-        # self.mse_recon = tf.keras.losses.MeanSquaredError()
-        # self.mse_recon_shuffle = tf.keras.losses.MeanSquaredError()
         self.l1_loss = tf.keras.losses.MeanAbsoluteError()
 
     @tf.function
@@ -237,4 +248,23 @@ class DisentangleVAE(tf.keras.Model):
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
         
         return {"loss": loss, "forward_cycle_loss": forward_cycle_loss, "reverse_cycle_loss": reverse_cycle_loss}
+    
+class ActorCriticPPO(tf.keras.Model):
+    def __init__(self, encoder: Encoder, actor: ActorNetwork, critic: CriticNetwork):
+        super(ActorCriticPPO, self).__init__()
+        self.input_dim = c.INPUT_SHAPE
+        self.n_actions = c.NUM_ACTIONS
+        self.encoder = encoder
+        self.actor = actor
+        self.critic = critic
+
+    @tf.function
+    def call(self, inputs, training=False):
+        x = self.encoder.call_mu_only(inputs)
+        return self.actor(x), self.critic(x)
+    
+    def act(self, state, training=False):
+        logits, _ = self.call(state)
+        action = tf.random.categorical(logits, 1)[0, 0]
+        return action.numpy()
     

@@ -1,6 +1,6 @@
 # General constants for the project
 DOMAIN_SPECIFIC_LATENT_SIZE = 8
-CONTENT_LATENT_SIZE = 16
+CONTENT_LATENT_SIZE = 32
 NUM_DOMAINS = 5 # 1 source, others are target
 INPUT_SHAPE = (64, 64, 3)
 
